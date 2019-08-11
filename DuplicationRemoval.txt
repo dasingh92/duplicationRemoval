@@ -1,0 +1,371 @@
+var NAME_COLUMN_INDEX = 0;
+var SIZE_COLUMN_INDEX = 1;
+var ID_COLUMN_INDEX = 3;
+
+var DELETED_COLOUR = 'red';
+var MARKED_FOR_DELETION_COLOUR = '#ffc0cb'; // pink
+
+function onOpen() {
+
+  SpreadsheetApp
+    .getUi()
+    .createMenu('Process files')
+    .addItem('Start search for files', 'startProcess')
+    .addItem('Mark duplicates', 'markDuplicates')
+    .addItem('Delete duplicates', 'deleteDuplicates')
+    .addToUi();
+    
+} // onOpen()
+
+// AJR - You may need to think about locking the code in case the list
+// of files in the sheet gets out of sync with you internal versionn
+
+// Create a list of files and start a trigger to continue the process
+
+function startProcess(){
+
+  var properties = PropertiesService.getScriptProperties();
+
+  properties.deleteAllProperties();
+  
+  try {
+  
+   ScriptApp.deleteTrigger(ScriptApp.getProjectTriggers()[0]); 
+    
+  } catch(e) {
+  
+    // Do nothing ...
+  }
+  
+  var sh = SpreadsheetApp.getActiveSheet();
+  
+  sh.getDataRange().clear();
+  
+  sh
+    .getRange(1,1,1,4)
+    .setValues([[
+      'fileName (logged @'+Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'MMM-dd-yyyy HH:mm')+')',
+      'fileSize',
+      'parent folders tree',
+      'fileID'
+    ]]);
+
+  // AJR - Moved this up
+  sh.setFrozenRows(1);
+    
+  var trig = ScriptApp.newTrigger('getDriveFilesList_').timeBased().everyMinutes(1).create();
+  
+  Logger.log(trig.getUniqueId()+'  '+trig.getHandlerFunction());
+  
+  getDriveFilesList_();
+}
+
+function getDriveFilesList_(){
+
+  var content = [];
+  var startTime = new Date().getTime();
+  var sh = SpreadsheetApp.getActiveSheet();
+  var properties = PropertiesService.getScriptProperties();  
+  
+  if( ! properties.getProperty('numberOfFiles')) {
+  
+    properties.setProperty('numberOfFiles',0);
+  }
+
+  var numberOfFiles = Number(properties.getProperty('numberOfFiles'));
+  
+  Logger.log(numberOfFiles);
+  
+  var max = numberOfFiles+100000;
+  
+  if( ! properties.getProperty('continuationToken')) {
+  
+    var files = DriveApp.getFiles();
+   //var files = DriveApp.getFolderById('1NDX6M34op0LbUH3M4SME2FsEkUmYv0H9').getFiles(); // use this line and comment the above if you want to process a single folder
+   // use your chosen folder ID of course (available from the browser url , the part after "https://drive.google.com/?authuser=0#folders/")
+   
+  } else {
+  
+    var files = DriveApp.continueFileIterator(properties.getProperty('continuationToken'));
+  }
+  
+  while(files.hasNext() && numberOfFiles<max) {
+  
+    var file = files.next();
+    
+    if(file.getSize()>0) {
+    
+      Logger.log('Found file: '+file.getName());
+    
+      numberOfFiles++;
+      var folder = '(shared)';
+      
+      if(file.getParents().hasNext()) {
+        folder = getTree_(file)
+      }
+      
+      content.push([file.getName(),file.getSize(),folder,file.getId()])
+    }    
+    
+    if((new Date().getTime()-startTime) > 25000) {
+      break;
+    }
+  }
+
+  // AJR - Added check so it ran on an empty folder
+  if (content.length>0){
+  
+    sh
+      .getRange(sh.getLastRow()+1,1,content.length,content[0].length)
+      .setValues(content);
+  }
+  
+  if(!files.hasNext()) {
+  
+    ScriptApp.deleteTrigger(ScriptApp.getProjectTriggers()[0]);
+    Logger.log('done !'); 
+    
+    sh
+      .getRange(sh.getLastRow()+1,1)
+      .setValue('All files processed ('+numberOfFiles+' found)');
+  }
+  
+  var continuationToken = files.getContinuationToken();
+  
+  properties.setProperty('numberOfFiles',numberOfFiles);
+  properties.setProperty('continuationToken',continuationToken);
+}
+
+function markDuplicates(){
+  ajrHandleDuplicates_(false)
+}
+
+function deleteDuplicates(){
+  ajrHandleDuplicates_(true)
+}
+
+
+
+// Rewrote as ajrHandleDuplicates_( below
+
+function handleDuplicates_(trash){  
+
+  var sh = SpreadsheetApp.getActiveSheet();
+//  sh.setFrozenRows(1);
+  
+  // AJR - Need to sort sheet after the header and footer have 
+  // been removed
+  // sh.sort(1);
+  
+  // Remove the header and footer from the array, delete the last
+  // row from the sheet and then sort the data and the sheet
+  
+  var data = sh.getDataRange().getValues();
+  
+  var headers = data.shift();
+  var lastComment = data.pop();
+ 
+  sh.deleteRow(sh.getLastRow());
+  
+  sh.sort(1);
+  data.sort();
+  
+  var toDelete = [];
+  var item = data[0]; // first file details array
+  
+  for(var n=1 ; n<data.length; n++){
+  
+    // If the name and size of the previous and the present file 
+    // are the same store the index of the present file
+    
+    if((data[n][0]===item[0] || data[n][0] == "Copy of " + item[0]) && data[n][1]===item[1]){
+    
+      // AJR - Any reason for adding the word 'delete'?
+      toDelete.push('delete '+ n);
+    }
+    
+    // Increment the file pointer
+    item=data[n];
+  }
+  
+  var marker = sh.getRange(2,1,data.length,1).getBackgrounds();
+  
+  // AJR - This is a neat way of stepping through an array, but Google recommends you 
+  // avoid using "for ... in" for arrays and keep it for proper objects:
+  //
+  // https://google-styleguide.googlecode.com/svn/trunk/javascriptguide.xml#for-in_loop
+  
+  for(var n in data){
+
+    if(!trash){
+    
+      // AJR - Don't know why this 'white' being added on the end?
+      marker.push(['#FF4500'])
+    }
+
+    // AJR - Should be !trash on this one
+
+    if(toDelete.indexOf('delete '+n)>-1 && !trash) {
+    
+      marker[n][0] = MARKED_FOR_DELETION_COLOUR; // #ff9999
+    }
+    
+    if(toDelete.indexOf('delete '+n)>-1 && trash) {
+    
+      if(marker[n][0]===MARKED_FOR_DELETION_COLOUR) {
+      
+        try {
+        
+          DriveApp.getFileById(data[n][3]).setTrashed(trash);
+          marker[n][0] = DELETED_COLOUR; // #FF3333
+        
+        } catch(err) {
+        
+          Logger.log(err)
+        }
+        
+      } else {
+      
+        // If this file has been marked for deletion, but isn't
+        // yet pink make it so rather than just deleting it without warning
+        marker[n][0] = MARKED_FOR_DELETION_COLOUR;  // AJR - 3?
+      }
+    }
+  }
+  
+  sh.getRange(2,1,marker.length,1).setBackgrounds(marker);
+}
+
+
+/**
+ * Look for duplicate files in the list in the sheet.
+ * 
+ * @ param {boolean} whether the duplicates should be trashed or not
+ */
+
+function ajrHandleDuplicates_(deleteFiles) {
+
+  // Get the file data from the sheet
+  // --------------------------------
+  //
+  // Remove the header and footer from the array, delete the last
+  // row from the sheet and then sort the data and the sheet
+  
+  var sheet = SpreadsheetApp.getActiveSheet();
+  
+  var rows = sheet.getDataRange().getValues();
+  rows.shift(); // Remove the header
+  var footer = rows.pop(); // Remove the footer
+  rows.sort();
+  
+  sheet.deleteRow(sheet.getLastRow());
+  sheet.sort(1);
+  SpreadsheetApp.flush();
+
+  // Create an array of row indexes to be deleted
+  // --------------------------------------------
+
+  var toDelete = [false]; // Don't ever delete the first one
+  var previousFile; 
+  var rowIndex;
+  var presentFile;
+  
+  for(previousFile=rows[0], rowIndex=1; 
+      rowIndex<rows.length; 
+      previousFile=rows[rowIndex], rowIndex++){
+  
+    // If the name and size of the previous and the present file 
+    // are the same store the index of the present file
+    
+    presentFile = rows[rowIndex]; 
+    
+    if(presentFile[NAME_COLUMN_INDEX]===previousFile[NAME_COLUMN_INDEX] && 
+       presentFile[SIZE_COLUMN_INDEX]===previousFile[SIZE_COLUMN_INDEX]) {
+    
+      toDelete.push(true);
+      
+    } else {
+    
+      toDelete.push(false);
+    }
+    
+  } // for each row
+
+  // Trash or simply mark as ready to trash
+  // --------------------------------------
+
+  var backgroundColoursRange = sheet.getRange(2,1,rows.length,1);
+  var backgroundColours = backgroundColoursRange.getBackgrounds();
+  var colour;
+
+  for(rowIndex=0; rowIndex<rows.length; rowIndex++) {
+  
+    colour = backgroundColours[rowIndex][NAME_COLUMN_INDEX];
+  
+    if(toDelete[rowIndex]) {
+    
+      if(deleteFiles) {
+      
+        if(colour===MARKED_FOR_DELETION_COLOUR) {
+      
+          try {
+          
+            DriveApp
+              .getFileById(rows[rowIndex][ID_COLUMN_INDEX])
+              .setTrashed(true);
+            
+            // Mark deleted
+            colour = DELETED_COLOUR; 
+          
+          } catch(error) {
+          
+            // Logger.log(error)
+            throw error;
+          }
+          
+        } else {
+
+          colour = MARKED_FOR_DELETION_COLOUR;        
+        }
+
+      } else {
+      
+        colour = MARKED_FOR_DELETION_COLOUR;         
+      }
+    } 
+
+    backgroundColours[rowIndex][NAME_COLUMN_INDEX] = colour; 
+
+  } // for each row
+
+  backgroundColoursRange.setBackgrounds(backgroundColours);
+  
+  sheet.appendRow(footer);
+
+} // ajrHandleDuplicates_()
+
+function getTree_(file){
+  var tree = [];
+  var folderP = file.getParents();
+  while (folderP.hasNext()){
+    var folder = folderP.next();
+    folderP = folder.getParents();
+    tree.push(folder.getName());
+  }
+  return tree.reverse().join('/');
+}
+
+function showScriptProperties() {
+
+  Logger.log(PropertiesService.getScriptProperties().getProperties());
+}
+
+function startAndMark() {
+
+  startProcess();
+  markDuplicates();
+}
+
+function getHex(input) {
+  return SpreadsheetApp.getActiveSpreadsheet().getRange(input).getBackgrounds();
+}
